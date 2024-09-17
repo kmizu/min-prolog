@@ -1,4 +1,93 @@
-// Prologインタプリタの実装（整数とリストを含む）
+// Prologインタプリタの完全な実装（外部ライブラリなし）
+
+// トークンを表すクラス
+sealed trait Token
+case class AtomToken(value: String) extends Token
+case class VariableToken(value: String) extends Token
+case class IntegerToken(value: Int) extends Token
+case class SymbolToken(value: String) extends Token
+case object EOFToken extends Token
+
+// 字句解析器（トークナイザ）の実装
+class Lexer(input: String) {
+  private val iterator = input.iterator.buffered
+  private var currentChar: Option[Char] = if (iterator.hasNext) Some(iterator.next()) else None
+
+  private def advance(): Unit = {
+    currentChar = if (iterator.hasNext) Some(iterator.next()) else None
+  }
+
+  private def skipWhitespace(): Unit = {
+    while (currentChar.exists(_.isWhitespace)) {
+      advance()
+    }
+  }
+
+  def nextToken(): Token = {
+    skipWhitespace()
+    currentChar match {
+      // アトム（小文字で始まる識別子）または 'is' をチェック
+      case Some(c) if c.isLetter && c.isLower =>
+        val sb = new StringBuilder
+        while (currentChar.exists(ch => ch.isLetterOrDigit || ch == '_')) {
+          sb.append(currentChar.get)
+          advance()
+        }
+        val value = sb.toString()
+        if (value == "is") SymbolToken("is") else AtomToken(value)
+
+      // 変数（大文字で始まる識別子またはアンダースコア）
+      case Some(c) if (c.isLetter && c.isUpper) || c == '_' =>
+        val sb = new StringBuilder
+        while (currentChar.exists(ch => ch.isLetterOrDigit || ch == '_')) {
+          sb.append(currentChar.get)
+          advance()
+        }
+        VariableToken(sb.toString())
+
+      // 整数
+      case Some(c) if c.isDigit =>
+        val sb = new StringBuilder
+        while (currentChar.exists(_.isDigit)) {
+          sb.append(currentChar.get)
+          advance()
+        }
+        IntegerToken(sb.toString().toInt)
+
+      // 特殊シンボル ':-' と '=='
+      case Some(':') =>
+        advance()
+        if (currentChar.contains('-')) {
+          advance()
+          SymbolToken(":-")
+        } else {
+          SymbolToken(":")
+        }
+
+      case Some('=') =>
+        advance()
+        if (currentChar.contains('=')) {
+          advance()
+          SymbolToken("==")
+        } else {
+          SymbolToken("=")
+        }
+
+      // その他のシンボル
+      case Some(c @ ('+' | '-' | '*' | '/' | '[' | ']' | '(' | ')' | ',' | '.' | '|')) =>
+        advance()
+        SymbolToken(c.toString)
+
+      // 不正な文字
+      case Some(c) =>
+        throw new RuntimeException(s"不正な文字: $c")
+
+      // 入力終了
+      case None =>
+        EOFToken
+    }
+  }
+}
 
 // 項を表す抽象データ型
 sealed trait Term
@@ -12,7 +101,7 @@ case class Atom(name: String) extends Term
 // 整数を表すクラス
 case class IntegerTerm(value: Int) extends Term
 
-// リストを表すクラス（空リストまたはConsセル）
+// リストを表すクラス
 sealed trait ListTerm extends Term
 case object EmptyList extends ListTerm
 case class Cons(head: Term, tail: Term) extends ListTerm
@@ -23,9 +112,239 @@ case class Compound(name: String, args: List[Term]) extends Term
 // ルール（ファクトとルール）を表すクラス
 case class Rule(head: Term, body: List[Term])
 
+// 構文解析器の実装
+class Parser(lexer: Lexer) {
+  private var currentToken: Token = lexer.nextToken()
+
+  private def eat(expected: Token): Unit = {
+    if (currentToken == expected) {
+      currentToken = lexer.nextToken()
+    } else {
+      throw new RuntimeException(s"Unexpected token: $currentToken, expected: $expected")
+    }
+  }
+
+  private def eatSymbol(value: String): Unit = {
+    currentToken match {
+      case SymbolToken(`value`) =>
+        currentToken = lexer.nextToken()
+      case _ =>
+        throw new RuntimeException(s"Unexpected token: $currentToken, expected symbol: $value")
+    }
+  }
+
+  // プログラム全体を解析
+  def parseProgram(): List[Rule] = {
+    var rules = List.empty[Rule]
+    while (currentToken != EOFToken) {
+      rules ::= parseSentence()
+    }
+    rules.reverse
+  }
+
+  // 文（ルールまたはファクト）を解析
+  def parseSentence(): Rule = {
+    val head = parseTerm()
+    currentToken match {
+      case SymbolToken(":-") =>
+        eatSymbol(":-")
+        val body = parseBody()
+        eatSymbol(".")
+        Rule(head, body)
+      case SymbolToken(".") =>
+        eatSymbol(".")
+        Rule(head, Nil)
+      case _ =>
+        throw new RuntimeException(s"Unexpected token in sentence: $currentToken")
+    }
+  }
+
+  // 本体の項のリストを解析
+  def parseBody(): List[Term] = {
+    val terms = scala.collection.mutable.ListBuffer[Term]()
+    terms += parseTerm()
+    while (currentToken == SymbolToken(",")) {
+      eatSymbol(",")
+      terms += parseTerm()
+    }
+    terms.toList
+  }
+
+  // 項（算術式も含む）を解析
+  def parseTerm(): Term = {
+    currentToken match {
+      case VariableToken(value) =>
+        val varName = value
+        eat(currentToken)
+        currentToken match {
+          case SymbolToken("is") =>
+            eatSymbol("is")
+            val expr = parseExpression()
+            Compound("is", List(Variable(varName), expr))
+          case _ =>
+            Variable(varName)
+        }
+
+      case AtomToken(value) =>
+        val atomName = value
+        eat(currentToken)
+        currentToken match {
+          case SymbolToken("(") =>
+            eatSymbol("(")
+            val args = parseTermList()
+            eatSymbol(")")
+            Compound(atomName, args)
+          case _ =>
+            Atom(atomName)
+        }
+
+      case IntegerToken(value) =>
+        eat(currentToken)
+        IntegerTerm(value)
+
+      case SymbolToken("[") =>
+        parseList()
+
+      case SymbolToken("(") =>
+        eatSymbol("(")
+        val term = parseExpression()
+        eatSymbol(")")
+        term
+
+      case _ =>
+        throw new RuntimeException(s"Unexpected token in term: $currentToken")
+    }
+  }
+
+  // 項のリストを解析
+  def parseTermList(): List[Term] = {
+    val terms = scala.collection.mutable.ListBuffer[Term]()
+    terms += parseTerm()
+    while (currentToken == SymbolToken(",")) {
+      eatSymbol(",")
+      terms += parseTerm()
+    }
+    terms.toList
+  }
+
+  // 式の解析（演算子の優先順位を考慮）
+  def parseExpression(): Term = parseEquality()
+
+  def parseEquality(): Term = {
+    var term = parseAddition()
+    while (currentToken == SymbolToken("==")) {
+      val op = "=="
+      eatSymbol(op)
+      val right = parseAddition()
+      term = Compound(op, List(term, right))
+    }
+    term
+  }
+
+  def parseAddition(): Term = {
+    var term = parseMultiplication()
+    while (currentToken == SymbolToken("+") || currentToken == SymbolToken("-")) {
+      val op = currentToken match {
+        case SymbolToken("+") => "+"
+        case SymbolToken("-") => "-"
+        case _ => throw new RuntimeException(s"Unexpected operator: $currentToken")
+      }
+      eatSymbol(op)
+      val right = parseMultiplication()
+      term = Compound(op, List(term, right))
+    }
+    term
+  }
+
+  def parseMultiplication(): Term = {
+    var term = parseFactor()
+    while (currentToken == SymbolToken("*") || currentToken == SymbolToken("/")) {
+      val op = currentToken match {
+        case SymbolToken("*") => "*"
+        case SymbolToken("/") => "/"
+        case _ => throw new RuntimeException(s"Unexpected operator: $currentToken")
+      }
+      eatSymbol(op)
+      val right = parseFactor()
+      term = Compound(op, List(term, right))
+    }
+    term
+  }
+
+  def parseFactor(): Term = {
+    currentToken match {
+      case VariableToken(value) =>
+        val varName = value
+        eat(currentToken)
+        Variable(varName)
+
+      case AtomToken(value) =>
+        val atomName = value
+        eat(currentToken)
+        currentToken match {
+          case SymbolToken("(") =>
+            eatSymbol("(")
+            val args = parseTermList()
+            eatSymbol(")")
+            Compound(atomName, args)
+          case _ =>
+            Atom(atomName)
+        }
+
+      case IntegerToken(value) =>
+        eat(currentToken)
+        IntegerTerm(value)
+
+      case SymbolToken("[") =>
+        parseList()
+
+      case SymbolToken("(") =>
+        eatSymbol("(")
+        val term = parseExpression()
+        eatSymbol(")")
+        term
+
+      case _ =>
+        throw new RuntimeException(s"Unexpected token in factor: $currentToken")
+    }
+  }
+
+  // リストのパース
+  def parseList(): Term = {
+    eatSymbol("[")
+    currentToken match {
+      case SymbolToken("]") =>
+        eatSymbol("]")
+        EmptyList
+      case _ =>
+        val listTerm = parseElements()
+        listTerm
+    }
+  }
+
+  def parseElements(): Term = {
+    val head = parseTerm()
+    currentToken match {
+      case SymbolToken(",") =>
+        eatSymbol(",")
+        val tail = parseElements()
+        Cons(head, tail)
+      case SymbolToken("|") =>
+        eatSymbol("|")
+        val tail = parseTerm()
+        eatSymbol("]")
+        Cons(head, tail)
+      case SymbolToken("]") =>
+        eatSymbol("]")
+        Cons(head, EmptyList)
+      case _ =>
+        throw new RuntimeException(s"Unexpected token in list: $currentToken")
+    }
+  }
+}
+
 // 知識ベースを表すクラス
 class KnowledgeBase(rules: List[Rule]) {
-
   // ユニフィケーションの実装
   def unify(x: Term, y: Term, theta: Map[Variable, Term]): Option[Map[Variable, Term]] = {
     val xResolved = substitute(x, theta)
@@ -89,7 +408,7 @@ class KnowledgeBase(rules: List[Rule]) {
     occurs(x)
   }
 
-  // 修正した substitute メソッド
+  // substituteメソッド
   def substitute(term: Term, theta: Map[Variable, Term]): Term = {
     def loop(t: Term, visited: Set[Variable]): Term = {
       t match {
@@ -205,69 +524,70 @@ class KnowledgeBase(rules: List[Rule]) {
 
 // 使用例
 object PrologInterpreter {
+  // ゴールに含まれる変数を収集するヘルパー関数
+  def collectVariables(term: Term): Set[Variable] = term match {
+    case v: Variable => Set(v)
+    case Compound(_, args) => args.flatMap(collectVariables).toSet
+    case Cons(head, tail) => collectVariables(head) ++ collectVariables(tail)
+    case _ => Set.empty
+  }
+
   def main(args: Array[String]): Unit = {
-    // 知識ベースの定義
-    val rules = List(
-      // length/2 のファクトとルール
-      Rule(Compound("length", List(EmptyList, IntegerTerm(0))), Nil),
-      Rule(
-        Compound("length", List(Cons(Variable("H"), Variable("T")), Variable("N"))),
-        List(
-          Compound("length", List(Variable("T"), Variable("N1"))),
-          Compound("is", List(Variable("N"), Compound("+", List(Variable("N1"), IntegerTerm(1)))))
-        )
-      )
-    )
+    // Prologプログラムを文字列として定義
+    val programText =
+      """
+      length([], 0).
+      length([H|T], N) :- length(T, N1), N is N1 + 1.
+      """
 
-    val kb = new KnowledgeBase(rules)
+    // プログラムをパース
+    val lexer = new Lexer(programText)
+    val parser = new Parser(lexer)
+    val parsedProgram = parser.parseProgram()
 
-    // リスト [a, b, c] の作成
-    val listABC = Cons(Atom("a"), Cons(Atom("b"), Cons(Atom("c"), EmptyList)))
+    val kb = new KnowledgeBase(parsedProgram)
 
-    // ゴールの定義
-    val goal = List(Compound("length", List(listABC, Variable("N"))))
+    // ゴールを文字列として定義
+    val goalText = "length([a, b, c], N)."
 
-    // ゴール内のユーザー変数を収集
-    val userVariables = collectVariables(goal)
+    // ゴールをパース
+    val goalLexer = new Lexer(goalText)
+    val goalParser = new Parser(goalLexer)
+    val parsedGoal = goalParser.parseProgram().headOption match {
+      case Some(Rule(goalTerm, Nil)) => List(goalTerm)
+      case _ =>
+        println("Invalid goal.")
+        return
+    }
+
+    // ゴールに含まれる変数を収集
+    val goalVariables: Set[Variable] = parsedGoal.flatMap(collectVariables).toSet
 
     // 解を求める
-    val solutions = kb.solve(goal)
+    val solutions = kb.solve(parsedGoal)
 
-    // 結果の表示
+    // 結果の表示（ゴール変数のみ）
     for (solution <- solutions) {
       println("解:")
-      // 代入を完全に適用した解を生成
-      val resolvedSolution = solution.mapValues(term => kb.substitute(term, solution))
-      // ユーザー変数のみを表示
-      for (variable <- userVariables) {
-        resolvedSolution.get(variable) match {
-          case Some(term) => println(s"${variable.name} = ${formatTerm(term)}")
-          case None => // 何もしない
-        }
+      // ゴール変数のみを抽出し、代入を完全に適用
+      val resolvedSolution = goalVariables.flatMap { variable =>
+        solution.get(variable).map(term => (variable, kb.substitute(term, solution)))
+      }
+      resolvedSolution.foreach {
+        case (variable, term) => println(s"${variable.name} = ${formatTerm(term)}")
       }
       println()
     }
   }
 
-  // ユーザー変数を収集するヘルパーメソッド
-  def collectVariables(terms: List[Term]): Set[Variable] = {
-    terms.flatMap(collectVariablesFromTerm).toSet
-  }
-
-  def collectVariablesFromTerm(term: Term): Set[Variable] = term match {
-    case v: Variable => Set(v)
-    case Compound(_, args) => args.flatMap(collectVariablesFromTerm).toSet
-    case Cons(head, tail) => collectVariablesFromTerm(head) ++ collectVariablesFromTerm(tail)
-    case _ => Set.empty
-  }
-
-  // 項を文字列にフォーマットするヘルパー関数
+  // 項を文字列にフォーマットするヘルパーメソッド
   def formatTerm(term: Term): String = term match {
     case Variable(name) => name
     case Atom(name) => name
     case IntegerTerm(value) => value.toString
     case EmptyList => "[]"
-    case list: ListTerm => "[" + formatList(list) + "]"
+    case Cons(head, tail) =>
+      "[" + formatList(Cons(head, tail)) + "]"
     case Compound(name, args) => s"$name(${args.map(formatTerm).mkString(", ")})"
   }
 
@@ -276,10 +596,10 @@ object PrologInterpreter {
     case Cons(head, tail) =>
       formatTerm(head) + (tail match {
         case EmptyList => ""
-        case _ => ", " + formatList(tail)
+        case _: Cons => ", " + formatList(tail)
+        case _ => " | " + formatTerm(tail)
       })
     case Variable(name) => name
     case _ => ""
   }
 }
-
