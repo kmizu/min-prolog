@@ -538,6 +538,8 @@ object PrologInterpreter {
       """
       length([], 0).
       length([H|T], N) :- length(T, N1), N is N1 + 1.
+      fac(0, 1).
+      fac(M, R) :- M1 is M - 1, fac(M1, N), R is M * N.
       """
 
     // プログラムをパース
@@ -548,7 +550,8 @@ object PrologInterpreter {
     val kb = new KnowledgeBase(parsedProgram)
 
     // ゴールを文字列として定義
-    val goalText = "length([a, b, c], N)."
+    //val goalText = "length([a, b, c, d], N)."
+    val goalText = "fac(5, N)."
 
     // ゴールをパース
     val goalLexer = new Lexer(goalText)
